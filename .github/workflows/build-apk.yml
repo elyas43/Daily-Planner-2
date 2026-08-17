@@ -26,7 +26,9 @@ jobs:
       - name: Extract Android Project
         run: |
           unzip -o daily-planner-android-github-fixed.zip -d android-project
-
+      - name: Add Firebase Configuration
+        run: |
+          cp google-services.json android-project/app/google-services.json
       - name: Setup Java 21
         uses: actions/setup-java@v5
         with:
