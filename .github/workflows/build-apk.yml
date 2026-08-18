@@ -1,191 +1,304 @@
 name: Build Android APK
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-apk:
+    name: Build Debug APK
     runs-on: ubuntu-latest
 
     steps:
 
-      # --------------------------------------------------
-      # 1. Checkout Repository
-      # --------------------------------------------------
+      # 1. Get repository files
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
       # 2. Find Android ZIP
-      # --------------------------------------------------
       - name: Find Android ZIP
         id: find_zip
         shell: bash
         run: |
+          set -e
+
           echo "Searching for Android ZIP..."
 
-          ZIP_FILE=$(find . -type f -name "*.zip" | head -n 1)
+          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No Android ZIP file found!"
             exit 1
           fi
 
-          echo "ZIP found:"
-          echo "$ZIP_FILE"
+          echo "Found ZIP: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      # --------------------------------------------------
       # 3. Extract Android Project
-      # --------------------------------------------------
       - name: Extract Android Project
         shell: bash
         run: |
-          echo "Extracting Android project..."
+          set -e
 
-          mkdir -p extracted
+          mkdir -p android-source
 
-          unzip -o "$ZIP_FILE" -d extracted
-
-          echo "Extraction completed."
+          unzip -o "${{ steps.find_zip.outputs.zip_file }}" -d android-source
 
           echo "Extracted files:"
-          find extracted -maxdepth 3 -type f | sort
+          find android-source -maxdepth 4 -type f | sort
 
-      # --------------------------------------------------
       # 4. Find Android Project Directory
-      # --------------------------------------------------
       - name: Find Android Project Directory
+        id: project
         shell: bash
         run: |
-          echo "Searching for Android Gradle project..."
+          set -e
 
-          PROJECT_DIR=$(find extracted \
-            -type f \
-            -name "settings.gradle" -o -name "settings.gradle.kts" \
-            -print -quit | xargs -r dirname)
+          PROJECT_DIR=""
+
+          # Look for settings.gradle
+          SETTINGS=$(find android-source -type f \( \
+            -name "settings.gradle" -o \
+            -name "settings.gradle.kts" \
+          \) | head -n 1)
+
+          if [ -n "$SETTINGS" ]; then
+            PROJECT_DIR=$(dirname "$SETTINGS")
+          fi
+
+          # If settings.gradle was not found, look for gradlew
+          if [ -z "$PROJECT_DIR" ]; then
+            GRADLEW=$(find android-source -type f -name "gradlew" | head -n 1)
+
+            if [ -n "$GRADLEW" ]; then
+              PROJECT_DIR=$(dirname "$GRADLEW")
+            fi
+          fi
+
+          # If still not found, look for build.gradle + app folder
+          if [ -z "$PROJECT_DIR" ]; then
+            BUILD=$(find android-source -type f -name "build.gradle" | head -n 1)
+
+            if [ -n "$BUILD" ]; then
+              CANDIDATE=$(dirname "$BUILD")
+
+              if [ -d "$CANDIDATE/app" ]; then
+                PROJECT_DIR="$CANDIDATE"
+              fi
+            fi
+          fi
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Android Gradle project not found!"
-            echo "Searching for Gradle files..."
-
-            find extracted \
-              -type f \
-              -name "build.gradle" -o -name "build.gradle.kts" \
-              -print
-
+            echo "Files found:"
+            find android-source -maxdepth 5 -type f | sort
             exit 1
           fi
 
           echo "Android project found:"
           echo "$PROJECT_DIR"
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      # --------------------------------------------------
       # 5. Show Project
-      # --------------------------------------------------
-      - name: Show Project
+      - name: Show Android Project
         shell: bash
         run: |
           echo "======================================"
-          echo "Android project directory:"
-          echo "$PROJECT_DIR"
+          echo "ANDROID PROJECT"
           echo "======================================"
 
-          echo "Project files:"
-          find "$PROJECT_DIR" -maxdepth 3 -type f | sort
+          echo "${{ steps.project.outputs.project_dir }}"
 
-      # --------------------------------------------------
+          echo ""
+          echo "Project files:"
+
+          find "${{ steps.project.outputs.project_dir }}" \
+            -maxdepth 3 \
+            -type f | sort
+
       # 6. Add Firebase Configuration
-      # --------------------------------------------------
       - name: Add Firebase Configuration
         shell: bash
         run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
           echo "======================================"
-          echo "Checking Firebase configuration..."
+          echo "Firebase Configuration"
           echo "======================================"
 
-          mkdir -p "$PROJECT_DIR/app"
+          # Search google-services.json in repository
+          FIREBASE_JSON=$(find . -type f \
+            -name "google-services.json" \
+            -not -path "./android-source/*" \
+            | head -n 1)
 
-          # First check if google-services.json
-          # already exists inside app/
-          if [ -f "$PROJECT_DIR/app/google-services.json" ]; then
-
-            echo "google-services.json already exists in app/"
-            echo "No copy is required."
-
-          else
-
-            echo "google-services.json is not in app/."
-
-            # Search the whole extracted project
-            FIREBASE_FILE=$(find "$PROJECT_DIR" \
-              -type f \
-              -name "google-services.json" \
-              -print -quit)
-
-            if [ -z "$FIREBASE_FILE" ]; then
-              echo "ERROR: google-services.json not found!"
-              echo ""
-              echo "Files inside project:"
-              find "$PROJECT_DIR" -maxdepth 4 -type f | sort
-              exit 1
-            fi
-
-            echo "Firebase file found:"
-            echo "$FIREBASE_FILE"
-
-            cp "$FIREBASE_FILE" \
-              "$PROJECT_DIR/app/google-services.json"
-
-            echo "Firebase configuration copied to:"
-            echo "$PROJECT_DIR/app/google-services.json"
-
+          # If not found, search inside extracted project
+          if [ -z "$FIREBASE_JSON" ]; then
+            FIREBASE_JSON=$(find android-source -type f \
+              -name "google-services.json" | head -n 1)
           fi
 
-          echo ""
-          echo "Final Firebase location:"
-          ls -lh "$PROJECT_DIR/app/google-services.json"
-
-      # --------------------------------------------------
-      # 7. Check Firebase Configuration
-      # --------------------------------------------------
-      - name: Check Firebase Configuration
-        shell: bash
-        run: |
-          echo "Checking Firebase configuration..."
-
-          if [ ! -f "$PROJECT_DIR/app/google-services.json" ]; then
-            echo "ERROR: Firebase configuration missing!"
+          if [ -z "$FIREBASE_JSON" ]; then
+            echo "ERROR: google-services.json not found!"
+            echo ""
+            echo "The file must exist in the repository."
             exit 1
           fi
 
-          echo "Firebase configuration OK."
+          echo "Firebase file found:"
+          echo "$FIREBASE_JSON"
 
-      # --------------------------------------------------
-      # 8. Setup Java
-      # --------------------------------------------------
+          mkdir -p "$PROJECT_DIR/app"
+
+          cp "$FIREBASE_JSON" \
+            "$PROJECT_DIR/app/google-services.json"
+
+          echo ""
+          echo "Firebase configuration copied to:"
+          echo "$PROJECT_DIR/app/google-services.json"
+
+      # 7. Setup Java
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      # --------------------------------------------------
-      # 9. Check Java Version
-      # --------------------------------------------------
+      # 8. Setup Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 9. Setup Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # 10. Check Java
       - name: Check Java Version
         shell: bash
         run: |
           java -version
 
-      # --------------------------------------------------
-      # 10. Setup Android SDK
-      # --------------------------------------------------
-      - name: Setup Android SDK
-        uses: android
+      # 11. Check Android SDK
+      - name: Check Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          adb version || true
+
+      # 12. Prepare Gradle
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "Gradle wrapper found."
+          else
+            echo "Gradle wrapper not found."
+            echo "Global Gradle will be used."
+          fi
+
+      # 13. Check Firebase File
+      - name: Verify Firebase Configuration
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          if [ ! -f "$PROJECT_DIR/app/google-services.json" ]; then
+            echo "ERROR: Firebase configuration is missing!"
+            exit 1
+          fi
+
+          echo "Firebase configuration OK."
+
+      # 14. Build Debug APK
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean assembleDebug --stacktrace
+          else
+            gradle clean assembleDebug --stacktrace
+          fi
+
+      # 15. Find APK
+      - name: Find APK
+        id: apk
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated!"
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
+
+      # 16. Show APK Information
+      - name: Check APK
+        shell: bash
+        run: |
+          APK="${{ steps.apk.outputs.apk_path }}"
+
+          echo "======================================"
+          echo "APK READY"
+          echo "======================================"
+
+          ls -lh "$APK"
+
+      # 17. Upload APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Daily-Planner-APK
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # 18. Build Summary
+      - name: Build Summary
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "BUILD SUCCESSFUL"
+          echo "======================================"
+          echo ""
+          echo "APK:"
+          echo "${{ steps.apk.outputs.apk_path }}"
+          echo ""
+          echo "Artifact:"
+          echo "Daily-Planner-APK"
